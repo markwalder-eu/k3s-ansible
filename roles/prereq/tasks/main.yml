@@ -1,8 +1,13 @@
 ---
+- name: Set same timezone on every Server
+  timezone:
+    name: "{{ k3s_system_timezone }}"
+  when: (k3s_system_timezone is defined) and (k3s_system_timezone != "Your/Timezone")
+
 - name: Set SELinux to disabled state
   selinux:
     state: disabled
-  when: ansible_distribution in ['CentOS', 'Red Hat Enterprise Linux']
+  when: ansible_os_family == "RedHat"
 
 - name: Enable IPv4 forwarding
   sysctl:
@@ -17,20 +22,19 @@
     value: "1"
     state: present
     reload: yes
-  when: ansible_all_ipv6_addresses
 
 - name: Add br_netfilter to /etc/modules-load.d/
   copy:
     content: "br_netfilter"
     dest: /etc/modules-load.d/br_netfilter.conf
     mode: "u=rw,g=,o="
-  when: ansible_distribution in ['CentOS', 'Red Hat Enterprise Linux']
+  when: ansible_os_family == "RedHat"
 
 - name: Load br_netfilter
   modprobe:
     name: br_netfilter
     state: present
-  when: ansible_distribution in ['CentOS', 'Red Hat Enterprise Linux']
+  when: ansible_os_family == "RedHat"
 
 - name: Set bridge-nf-call-iptables (just to be sure)
   sysctl:
@@ -38,7 +42,7 @@
     value: "1"
     state: present
     reload: yes
-  when: ansible_distribution in ['CentOS', 'Red Hat Enterprise Linux']
+  when: ansible_os_family == "RedHat"
   loop:
     - net.bridge.bridge-nf-call-iptables
     - net.bridge.bridge-nf-call-ip6tables
@@ -51,4 +55,55 @@
     insertafter: EOF
     path: /etc/sudoers
     validate: 'visudo -cf %s'
-  when: ansible_distribution in ['CentOS', 'Red Hat Enterprise Linux']
+  when: ansible_os_family == "RedHat"
+
+- name: Check block device
+  ansible.builtin.stat:
+    path: "/dev/vdb"
+  register: file_data
+
+- name: Create data lvm
+  when: file_data.stat.exists == true
+  block:
+
+  - name: Create new primary partition
+    community.general.parted:
+      device: /dev/vdb
+      number: 1
+      flags: [ lvm ]
+      state: present
+
+  - name: Create volume group
+    lvg:
+      vg: data-vg
+      pvs: /dev/vdb1
+      pesize: "16"
+
+  - name: Install lvm2 dependency
+    package:
+      name: lvm2
+      state: present
+
+  - name: Creating logical volume
+    lvol:
+      vg: data-vg
+      lv: data-lv
+      size: "100%VG"
+
+  - name: Create directory data if does not exist
+    file:
+      path: /data
+      state: directory
+      mode: "0755"
+
+  - name: Format the ext4 filesystem
+    filesystem:
+      fstype: ext4
+      dev: /dev/data-vg/data-lv
+
+  - name: Mount the lv on /data
+    mount:
+      path: /data
+      src: /dev/data-vg/data-lv
+      fstype: ext4
+      state: mounted
