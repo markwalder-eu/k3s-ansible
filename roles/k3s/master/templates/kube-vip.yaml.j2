@@ -11,27 +11,12 @@ metadata:
     rbac.authorization.kubernetes.io/autoupdate: "true"
   name: system:kube-vip-role
 rules:
-- apiGroups:
-  - ""
-  resources:
-  - services
-  - services/status
-  - nodes
-  verbs:
-  - list
-  - get
-  - watch
-  - update
-- apiGroups:
-  - coordination.k8s.io
-  resources:
-  - leases
-  verbs:
-  - list
-  - get
-  - watch
-  - update
-  - create
+  - apiGroups: [""]
+    resources: ["services", "services/status", "nodes", "endpoints"]
+    verbs: ["list","get","watch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["list", "get", "watch", "update", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -64,7 +49,7 @@ kind: DaemonSet
 metadata:
   labels:
     app.kubernetes.io/name: kube-vip-ds
-    app.kubernetes.io/version: v0.5.0
+    app.kubernetes.io/version: v0.5.7
   name: kube-vip-ds
   namespace: kube-system
 spec:
@@ -75,7 +60,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: kube-vip-ds
-        app.kubernetes.io/version: v0.5.0
+        app.kubernetes.io/version: v0.5.7
     spec:
       affinity:
         nodeAffinity:
@@ -91,20 +76,32 @@ spec:
       - args:
         - manager
         env:
-        - name: vip_interface
-          value: '{{ k3s_kubevip_flannel_iface }}'
         - name: address
-          value: '{{ k3s_apiserver_endpoint }}'
-        - name: vip_arp
-          value: "true"
+          value: '{{ k3s_apiserver_endpoint_address }}'
         - name: port
-          value: "6443"
-        - name: vip_cidr
-          value: "32"
+          value: '{{ k3s_apiserver_endpoint_port }}'
         - name: cp_enable
           value: "true"
         - name: cp_namespace
           value: kube-system
+        - name: svc_enable
+          value: "true"
+        - name: bgp_enable
+          value: "true"
+        - name: bgp_routerinterface
+          value: '{{ k3s_kubevip_bgp_routerinterface }}'
+        - name: bgp_as
+          value: '{{ k3s_kubevip_bgp_as }}'
+        - name: bgp_peeraddress
+          value: '{{ k3s_kubevip_bgp_peeraddress }}'
+        - name: bgp_peeras
+          value: '{{ k3s_kubevip_bgp_peeras }}'
+        - name: vip_arp
+          value: "false"
+        - name: vip_interface
+          value: '{{ k3s_kubevip_flannel_iface }}'
+        - name: vip_cidr
+          value: "32"
         - name: vip_ddns
           value: "false"
         - name: vip_leaderelection
@@ -117,7 +114,7 @@ spec:
           value: "1"
         - name: prometheus_server
           value: :2112
-        image: ghcr.io/kube-vip/kube-vip:v0.5.0
+        image: ghcr.io/kube-vip/kube-vip:v0.5.7
         imagePullPolicy: Always
         name: kube-vip
         resources: {}
@@ -139,3 +136,100 @@ status:
   desiredNumberScheduled: 0
   numberMisscheduled: 0
   numberReady: 0
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-vip-cloud-controller
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  name: system:kube-vip-cloud-controller-role
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update", "list", "put"]
+  - apiGroups: [""]
+    resources: ["configmaps", "endpoints","events","services/status", "leases"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["nodes", "services"]
+    verbs: ["list","get","watch","update"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: system:kube-vip-cloud-controller-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-vip-cloud-controller-role
+subjects:
+- kind: ServiceAccount
+  name: kube-vip-cloud-controller
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-vip-cloud-provider
+  namespace: kube-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: kube-vip
+      component: kube-vip-cloud-provider
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: kube-vip
+        component: kube-vip-cloud-provider
+    spec:
+      containers:
+      - command:
+        - /kube-vip-cloud-provider
+        - --leader-elect-resource-name=kube-vip-cloud-controller
+        image: ghcr.io/kube-vip/kube-vip-cloud-provider:v0.0.4
+        name: kube-vip-cloud-provider
+        imagePullPolicy: Always
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      serviceAccountName: kube-vip-cloud-controller
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 10
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+          - weight: 10
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubevip
+  namespace: kube-system
+data:
+  range-global: '{{ k3s_kubevip_ip_range }}'
